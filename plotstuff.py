@@ -17,6 +17,24 @@ from typing import Sequence
 
 import numpy as np
 
+# Leave this empty to plot every joint.
+# Add exact CSV joint names here to plot only a subset.
+# PLOT_ONLY_JOINTS: list[str] = [
+#     "left_hip_pitch_joint",
+#     "left_hip_roll_joint",
+#     "left_hip_yaw_joint",
+#     "left_knee_joint",
+#     "left_ankle_pitch_joint",
+#     "left_ankle_roll_joint"
+# ]
+
+PLOT_ONLY_JOINTS: list[str] = [
+    "l_hip_yaw_actuator",
+    "l_hip_roll_actuator",
+    "l_hip_pitch_actuator",
+    "l_knee_pitch_actuator",
+    "l_ankle_pitch_actuator",
+]
 
 def parse_frame_range(value: str) -> tuple[int, int]:
     """Parse a frame range like `[0,30]`, `(0,30)`, or `0:30`."""
@@ -223,6 +241,33 @@ def range_summary(
     )
 
 
+def filter_joint_columns(
+    joint_names: Sequence[str],
+    torques: np.ndarray,
+    requested_joint_names: Sequence[str],
+) -> tuple[list[str], np.ndarray, list[str]]:
+    if not requested_joint_names:
+        return list(joint_names), torques, []
+
+    joint_index_by_name = {joint_name: index for index, joint_name in enumerate(joint_names)}
+    selected_indices: list[int] = []
+    selected_joint_names: list[str] = []
+    missing_joint_names: list[str] = []
+
+    for joint_name in requested_joint_names:
+        joint_index = joint_index_by_name.get(joint_name)
+        if joint_index is None:
+            missing_joint_names.append(joint_name)
+            continue
+        selected_indices.append(joint_index)
+        selected_joint_names.append(joint_name)
+
+    if not selected_indices:
+        return [], torques[:, :0], missing_joint_names
+
+    return selected_joint_names, torques[:, selected_indices], missing_joint_names
+
+
 def plot_together(
     output_pdf: Path,
     joint_names: Sequence[str],
@@ -342,9 +387,19 @@ def main() -> None:
     else:
         start, end = resolve_frame_slice(args.frame_range, len(times))
 
-    raw_selected_times = times[start:end]
+    selected_times = times[start:end]
     selected_torques = data[start:end, 1:]
-    selected_times = raw_selected_times - raw_selected_times[0]
+    plotted_joint_names, selected_torques, missing_joint_names = filter_joint_columns(
+        joint_names, selected_torques, PLOT_ONLY_JOINTS
+    )
+
+    for joint_name in missing_joint_names:
+        print(f"Skipping missing joint: {joint_name}")
+
+    if not plotted_joint_names:
+        if PLOT_ONLY_JOINTS:
+            raise SystemExit("No requested joints were found in the CSV, so nothing was plotted.")
+        raise SystemExit("No joints were available to plot.")
 
     sample_rate = infer_sample_rate(times)
     summary = range_summary(start, end, selected_times, sample_rate)
@@ -353,12 +408,20 @@ def main() -> None:
         if args.mode == "together":
             output_pngs = [
                 plot_together(
-                    output_pdf, joint_names, selected_times, selected_torques, summary
+                    output_pdf,
+                    plotted_joint_names,
+                    selected_times,
+                    selected_torques,
+                    summary,
                 )
             ]
         else:
             output_pngs = plot_separate(
-                output_pdf, joint_names, selected_times, selected_torques, summary
+                output_pdf,
+                plotted_joint_names,
+                selected_times,
+                selected_torques,
+                summary,
             )
     except ImportError as exc:
         raise SystemExit(
@@ -368,9 +431,9 @@ def main() -> None:
     print(f"Loaded {len(times)} samples and {len(joint_names)} joints from {input_csv}")
     print(
         f"Selected {end - start} samples: [{start}, {end}) "
-        f"-> original {raw_selected_times[0]:.3f}s to {raw_selected_times[-1]:.3f}s, "
-        f"plotted as {selected_times[0]:.3f}s to {selected_times[-1]:.3f}s"
+        f"-> {selected_times[0]:.3f}s to {selected_times[-1]:.3f}s"
     )
+    print(f"Plotting {len(plotted_joint_names)} joint(s)")
     if sample_rate is not None:
         print(f"Inferred sample rate: {sample_rate:.3f} Hz")
     print(f"Wrote {args.mode} plot PDF to: {output_pdf}")
