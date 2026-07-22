@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
-from statistics import fmean
+from statistics import fmean, quantiles
 
 
 DISPLAY_NAMES = {
@@ -16,8 +16,10 @@ DISPLAY_NAMES = {
 }
 
 
-def load_mean_fps(csv_path: Path) -> tuple[list[str], list[float], int]:
-    """Return method names and mean FPS, excluding the blank summary row."""
+def load_fps_statistics(
+    csv_path: Path,
+) -> tuple[list[str], list[float], list[float], list[float], int]:
+    """Return mean and IQR statistics, excluding the blank summary row."""
     with csv_path.open(newline="", encoding="utf-8") as file:
         reader = csv.reader(file)
         try:
@@ -57,7 +59,8 @@ def load_mean_fps(csv_path: Path) -> tuple[list[str], list[float], int]:
     if not measurements:
         raise ValueError("The CSV contains no motion measurements")
 
-    mean_fps = [fmean(column) for column in zip(*measurements, strict=True)]
+    columns = [list(column) for column in zip(*measurements, strict=True)]
+    mean_fps = [fmean(column) for column in columns]
     if summary is not None:
         for method, calculated, provided in zip(methods, mean_fps, summary, strict=True):
             tolerance = max(1e-6, abs(calculated) * 1e-9)
@@ -66,7 +69,16 @@ def load_mean_fps(csv_path: Path) -> tuple[list[str], list[float], int]:
                     f"Summary value for {method!r} does not match the motion-row mean"
                 )
 
-    return methods, mean_fps, len(measurements)
+    first_quartiles: list[float] = []
+    third_quartiles: list[float] = []
+    for column in columns:
+        first_quartile, _median_value, third_quartile = quantiles(
+            column, n=4, method="inclusive"
+        )
+        first_quartiles.append(first_quartile)
+        third_quartiles.append(third_quartile)
+
+    return methods, mean_fps, first_quartiles, third_quartiles, len(measurements)
 
 
 def format_fps(value: float) -> str:
@@ -77,7 +89,13 @@ def format_fps(value: float) -> str:
     return f"{value:.2f}"
 
 
-def create_chart(methods: list[str], mean_fps: list[float], output_path: Path) -> None:
+def create_chart(
+    methods: list[str],
+    mean_fps: list[float],
+    first_quartiles: list[float],
+    third_quartiles: list[float],
+    output_path: Path,
+) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -101,9 +119,15 @@ def create_chart(methods: list[str], mean_fps: list[float], output_path: Path) -
         }
     )
 
-    rows = sorted(zip(methods, mean_fps, strict=True), key=lambda item: item[1], reverse=True)
+    rows = sorted(
+        zip(methods, mean_fps, first_quartiles, third_quartiles, strict=True),
+        key=lambda item: item[1],
+        reverse=True,
+    )
     sorted_methods = [DISPLAY_NAMES.get(row[0], row[0]) for row in rows]
     sorted_fps = [row[1] for row in rows]
+    sorted_first_quartiles = [row[2] for row in rows]
+    sorted_third_quartiles = [row[3] for row in rows]
     fastest = sorted_fps[0]
     positions = list(range(len(rows)))
 
@@ -125,11 +149,36 @@ def create_chart(methods: list[str], mean_fps: list[float], output_path: Path) -
         zorder=3,
     )
 
-    for position, value in zip(positions, sorted_fps, strict=True):
+    for position, first_quartile, third_quartile in zip(
+        positions,
+        sorted_first_quartiles,
+        sorted_third_quartiles,
+        strict=True,
+    ):
+        axis.hlines(
+            position,
+            first_quartile,
+            third_quartile,
+            color="#202428",
+            linewidth=1.5,
+            zorder=5,
+        )
+        axis.vlines(
+            [first_quartile, third_quartile],
+            position - 0.11,
+            position + 0.11,
+            color="#202428",
+            linewidth=1.5,
+            zorder=5,
+        )
+
+    for position, value, third_quartile in zip(
+        positions, sorted_fps, sorted_third_quartiles, strict=True
+    ):
         slowdown = fastest / value
         comparison = "fastest" if slowdown < 1.0005 else f"{slowdown:,.1f}× slower"
         axis.text(
-            value * 1.14,
+            max(value, third_quartile) * 1.16,
             position,
             f"{format_fps(value)} FPS  ·  {comparison}",
             va="center",
@@ -185,8 +234,16 @@ def main() -> None:
         raise SystemExit("Output must use a .pdf or .png extension")
 
     try:
-        methods, mean_fps, motion_count = load_mean_fps(args.input_csv)
-        create_chart(methods, mean_fps, args.output)
+        methods, mean_fps, first_quartiles, third_quartiles, motion_count = (
+            load_fps_statistics(args.input_csv)
+        )
+        create_chart(
+            methods,
+            mean_fps,
+            first_quartiles,
+            third_quartiles,
+            args.output,
+        )
     except (OSError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -197,7 +254,8 @@ def main() -> None:
     ):
         slowdown = fastest / value
         comparison = "fastest" if slowdown < 1.0005 else f"{slowdown:.1f}x slower"
-        print(f"{method}: {format_fps(value)} FPS ({comparison})")
+        print(f"{method}: mean {format_fps(value)} FPS ({comparison})")
+    print("Error bars show the 25th--75th percentile range")
     print(f"Wrote {args.output}")
 
 
